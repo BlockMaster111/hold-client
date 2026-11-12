@@ -1,0 +1,208 @@
+package de.example.whold;
+
+import com.mojang.brigadier.arguments.DoubleArgumentType;
+import com.mojang.brigadier.builder.LiteralArgumentBuilder;
+import net.fabricmc.api.ClientModInitializer;
+import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
+import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.minecraft.client.Minecraft;
+import net.minecraft.network.chat.Component;
+
+import java.util.function.BiConsumer;
+import java.util.function.BiFunction;
+
+import static net.fabricmc.fabric.api.client.command.v2.ClientCommands.argument;
+import static net.fabricmc.fabric.api.client.command.v2.ClientCommands.literal;
+
+public final class WHoldClient implements ClientModInitializer {
+
+    private static long startAtNanos = 0L;
+    private static long releaseAtNanos = 0L;
+    private static boolean holdingForward = false;
+
+    private static long leftStartAtNanos = 0L;
+    private static long leftReleaseAtNanos = 0L;
+    private static boolean holdingLeft = false;
+
+    private static long rightStartAtNanos = 0L;
+    private static long rightReleaseAtNanos = 0L;
+    private static boolean holdingRight = false;
+
+    private static long sneakStartAtNanos = 0L;
+    private static long sneakReleaseAtNanos = 0L;
+    private static boolean holdingSneak = false;
+
+    @Override
+    public void onInitializeClient() {
+
+        ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) ->
+            // /move w|a|d|sneak <laufzeit> <verzoegerung>
+            dispatcher.register(
+                literal("move")
+                    .then(timed("w", WHoldClient::startHolding,
+                        (duration, delay) -> "W startet in " + delay +
+                            " Sekunden und wird " + duration + " Sekunden gehalten."))
+                    .then(timed("a", WHoldClient::startHoldingLeft,
+                        (duration, delay) -> "A startet in " + delay +
+                            " Sekunden und wird " + duration + " Sekunden gehalten."))
+                    .then(timed("d", WHoldClient::startHoldingRight,
+                        (duration, delay) -> "D startet in " + delay +
+                            " Sekunden und wird " + duration + " Sekunden gehalten."))
+                    .then(timed("sneak", WHoldClient::startSneaking,
+                        (duration, delay) -> "Sneaken startet in " + delay +
+                            " Sekunden und dauert " + duration + " Sekunden."))
+            )
+        );
+
+        ClientTickEvents.END_CLIENT_TICK.register(client -> {
+            long now = System.nanoTime();
+
+            if (client.player == null) {
+                client.options.keyUp.setDown(false);
+                client.options.keySprint.setDown(false);
+                client.options.keyLeft.setDown(false);
+                client.options.keyRight.setDown(false);
+                client.options.keyShift.setDown(false);
+
+                holdingForward = false;
+                holdingLeft = false;
+                holdingRight = false;
+                holdingSneak = false;
+                startAtNanos = 0L;
+                leftStartAtNanos = 0L;
+                rightStartAtNanos = 0L;
+                sneakStartAtNanos = 0L;
+                return;
+            }
+
+            // W + Sprint
+            if (!holdingForward && startAtNanos > 0L && now >= startAtNanos) {
+                client.options.keyUp.setDown(true);
+                client.options.keySprint.setDown(true);
+                holdingForward = true;
+            }
+
+            if (holdingForward && now >= releaseAtNanos) {
+                client.options.keyUp.setDown(false);
+                client.options.keySprint.setDown(false);
+                holdingForward = false;
+                startAtNanos = 0L;
+            }
+
+            // A
+            if (!holdingLeft && leftStartAtNanos > 0L && now >= leftStartAtNanos) {
+                client.options.keyLeft.setDown(true);
+                holdingLeft = true;
+            }
+
+            if (holdingLeft && now >= leftReleaseAtNanos) {
+                client.options.keyLeft.setDown(false);
+                holdingLeft = false;
+                leftStartAtNanos = 0L;
+            }
+
+            // D
+            if (!holdingRight && rightStartAtNanos > 0L && now >= rightStartAtNanos) {
+                client.options.keyRight.setDown(true);
+                holdingRight = true;
+            }
+
+            if (holdingRight && now >= rightReleaseAtNanos) {
+                client.options.keyRight.setDown(false);
+                holdingRight = false;
+                rightStartAtNanos = 0L;
+            }
+
+            // Sneak
+            if (!holdingSneak && sneakStartAtNanos > 0L && now >= sneakStartAtNanos) {
+                client.options.keyShift.setDown(true);
+                holdingSneak = true;
+            }
+
+            if (holdingSneak && now >= sneakReleaseAtNanos) {
+                client.options.keyShift.setDown(false);
+                holdingSneak = false;
+                sneakStartAtNanos = 0L;
+            }
+        });
+    }
+
+    /** Baut "<name> <laufzeit> <verzoegerung>" (beides Sekunden, Dezimalzahlen erlaubt). */
+    private static LiteralArgumentBuilder<FabricClientCommandSource> timed(
+            String name,
+            BiConsumer<Double, Double> action,
+            BiFunction<Double, Double, String> feedback) {
+        return literal(name)
+            .then(argument("laufzeit", DoubleArgumentType.doubleArg(0.05, 3600.0))
+                .then(argument("verzoegerung", DoubleArgumentType.doubleArg(0.0, 3600.0))
+                    .executes(context -> {
+                        double duration = DoubleArgumentType.getDouble(context, "laufzeit");
+                        double delay = DoubleArgumentType.getDouble(context, "verzoegerung");
+
+                        action.accept(duration, delay);
+                        context.getSource().sendFeedback(Component.literal(feedback.apply(duration, delay)));
+                        return 1;
+                    })
+                )
+            );
+    }
+
+    private static void startHolding(double seconds, double delay) {
+        Minecraft client = Minecraft.getInstance();
+
+        if (holdingForward) {
+            client.options.keyUp.setDown(false);
+            client.options.keySprint.setDown(false);
+            holdingForward = false;
+        }
+
+        long now = System.nanoTime();
+
+        startAtNanos = now + (long) (delay * 1_000_000_000L);
+        releaseAtNanos = startAtNanos + (long) (seconds * 1_000_000_000L);
+    }
+
+    private static void startHoldingLeft(double seconds, double delay) {
+        Minecraft client = Minecraft.getInstance();
+
+        if (holdingLeft) {
+            client.options.keyLeft.setDown(false);
+            holdingLeft = false;
+        }
+
+        long now = System.nanoTime();
+
+        leftStartAtNanos = now + (long) (delay * 1_000_000_000L);
+        leftReleaseAtNanos = leftStartAtNanos + (long) (seconds * 1_000_000_000L);
+    }
+
+    private static void startHoldingRight(double seconds, double delay) {
+        Minecraft client = Minecraft.getInstance();
+
+        if (holdingRight) {
+            client.options.keyRight.setDown(false);
+            holdingRight = false;
+        }
+
+        long now = System.nanoTime();
+
+        rightStartAtNanos = now + (long) (delay * 1_000_000_000L);
+        rightReleaseAtNanos = rightStartAtNanos + (long) (seconds * 1_000_000_000L);
+    }
+
+    private static void startSneaking(double seconds, double delay) {
+        Minecraft client = Minecraft.getInstance();
+
+        if (holdingSneak) {
+            client.options.keyShift.setDown(false);
+            holdingSneak = false;
+        }
+
+        long now = System.nanoTime();
+
+        sneakStartAtNanos = now + (long) (delay * 1_000_000_000L);
+        sneakReleaseAtNanos = sneakStartAtNanos +
+            (long) (seconds * 1_000_000_000L);
+    }
+}
